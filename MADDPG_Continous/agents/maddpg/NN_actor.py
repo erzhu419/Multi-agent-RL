@@ -31,15 +31,27 @@ class MLPNetworkActor(nn.Module):
             m.bias.data.fill_(0.01)
     
     def forward(self, x):
-        x = self.net(x)
-        logi = x
-        a_min = self.action_bound[0]
-        a_max = self.action_bound[1]
-        ''' 这三行为什么要这么处理？ 引入了bias项干嘛'''
-        k = torch.tensor( (a_max - a_min) /2 , device=x.device )
-        bias = torch.tensor( (a_max + a_min) /2, device=x.device )
-        action = k * torch.tanh(x) + bias
-        return action, logi
+        # 批量处理输入
+        if x.dim() > 2:  # 批处理情况
+            batch_size = x.size(0)
+            x = self.net(x.view(-1, x.size(-1)))
+            logi = x
+            a_min = self.action_bound[0]
+            a_max = self.action_bound[1]
+            k = torch.tensor((a_max - a_min) / 2, device=x.device)
+            bias = torch.tensor((a_max + a_min) / 2, device=x.device)
+            action = k * torch.tanh(x) + bias
+            return action.view(batch_size, -1), logi.view(batch_size, -1)
+        else:
+            # 单个处理
+            x = self.net(x)
+            logi = x
+            a_min = self.action_bound[0]
+            a_max = self.action_bound[1]
+            k = torch.tensor((a_max - a_min) / 2, device=x.device)
+            bias = torch.tensor((a_max + a_min) / 2, device=x.device)
+            action = k * torch.tanh(x) + bias
+            return action, logi
 
     def save_checkpoint(self, is_target=False, timestamp = False):
         # 使用时间戳保存功能

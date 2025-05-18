@@ -18,7 +18,7 @@ class MADDPG():
         self.device = _device
         self.model_timestamp = _model_timestamp
         # 状态（全局观测）与所有智能体动作维度的和 即critic网络的输入维度  dim_info =  [obs_dim, act_dim]
-        global_obs_act_dim = sum(sum(val) for val in dim_info.values())
+        global_obs_act_dim = 32
         # 创建智能体与buffer，每个智能体有自己的buffer, actor, critic
         self.agents = {}
         self.buffers = {}
@@ -33,20 +33,18 @@ class MADDPG():
         self.batch_size = batch_size
 
     def add(self, obs, action, reward, next_obs, done):
-    # NOTE that the experience is a dict with agent name as its key
-        # Identify keys where obs length is 2
         keys_with_two_obs = [key for key, val in obs.items() if isinstance(val, list) and len(val) == 2]
         
         for agent_id in keys_with_two_obs:
-            o = obs[agent_id][0]  # Current observation
-            next_o = obs[agent_id][1]  # Next observation
+            o = obs[agent_id][0]
+            next_o = obs[agent_id][1]
             a = action[agent_id]
-            if isinstance(a, int):  # Convert integer action to one-hot encoding
+            if isinstance(a, int):
                 a = np.eye(self.dim_info[agent_id][1])[a]
             r = reward[agent_id]
             d = done
-            self.buffers[agent_id].add(o, a, r, next_o, d)
             
+            # 只添加一次
             self.buffers[agent_id].add(o, a, r, next_o, d)
     
     def sample(self, batch_size, agent_id):
@@ -70,20 +68,24 @@ class MADDPG():
 
         return o, a, r, n_o, d, next_a
     
+    # 在select_action中实现批处理
     def select_action(self, obs, action):
-        for agent_id, o in obs.items():
-            # Handle case where obs might be a list with multiple observations
-            if len(o) == 0:  # Skip if the observation list is empty
-                continue
-            if len(o) > 1:  # Use the last observation if multiple are provided
-                o = o[-1]
-            if len(o) == 1:
-                # if agent_id == 2:
-                #     print('here is the bug')
-                o = torch.from_numpy(np.array(o)).unsqueeze(0).float().to(self.device)
-                a, _ = self.agents[agent_id].action(o)   # torch.Size([1, action_size])
-                # NOTE that the output is a tensor, convert it to int before input to the environment
-                action[agent_id] = a.squeeze(0).detach().cpu().numpy()
+        with torch.no_grad():  # 避免不必要的梯度计算
+            keys_to_process = [k for k in obs if len(obs[k]) > 0]
+            if not keys_to_process:
+                return action
+                
+            # 批处理观察
+            batch_obs = torch.stack([torch.FloatTensor(obs[k][0]) for k in keys_to_process])
+            batch_obs = batch_obs.to(self.device)
+            
+            # 为每个待处理智能体获取动作
+            for i, k in enumerate(keys_to_process):
+                a, _ = self.agents[k].action(batch_obs[i:i+1])
+                action[k] = a.cpu().numpy().squeeze(0)
+                
+            return action
+            
         return action
     # 更多解释-飞书链接：https://m6tsmtxj3r.feishu.cn/docx/Kb1vdqvBholiIUxcvYxcIcBcnEg?from=from_copylink   密码：6u2257#8
     def learn(self, batch_size, gamma, agent_id):

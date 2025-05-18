@@ -34,7 +34,7 @@ class env_bus(object):
         with open(config_path, 'r') as f:
             args = json.load(f)
         self.args = args
-        self.effective_trip_num = 10
+        self.effective_trip_num = 264
         
         self.time_step = args["time_step"]
         self.passenger_update_freq = args["passenger_state_update_freq"]
@@ -47,7 +47,7 @@ class env_bus(object):
         self.timetable_set = self.timetable_set.sort_values(by=['launch_time', 'direction'])[:self.effective_trip_num].reset_index(drop=True)
         # add index for timetable
         self.timetable_set['launch_turn'] = range(self.timetable_set.shape[0])
-        self.max_agent_num = 25
+        self.max_agent_num = 30
 
         self.visualizer = visualize(self)
 

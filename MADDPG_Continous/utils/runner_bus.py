@@ -5,9 +5,10 @@ import os
 import threading
 from datetime import datetime
 import torch, psutil
+from tqdm import trange
 
-model_path = '../../models/maddpg_models'  # 模型保存路径
-def plot(rewards, q_values_episode):
+model_path = '/home/erzhu419/mine_code/Multi-agent-RL/MADDPG_Continous/models/maddpg_models'  # 模型保存路径
+def plot(rewards, q_values_episode, path):
     """
     绘制奖励曲线
     :param rewards: 奖励列表
@@ -21,12 +22,15 @@ def plot(rewards, q_values_episode):
     plt.figure(figsize=(10, 5))
     plt.plot(rewards, label="Reward")
     plt.plot(q_values_episode, label="Q-Value")
+    plt.legend()
 
     plt.xlabel('Episode')
     plt.ylabel('Smoothed Reward')
     plt.title('Smoothed Rewards over Episodes')
+
     plt.grid()
-    plt.show()
+
+    plt.close()
     
 class RUNNER:
     def __init__(self, agent, env, args, device, mode ='evaluate'):
@@ -36,7 +40,7 @@ class RUNNER:
         # 这里为什么新建而不是直接使用用agent.agents.keys()？
         # 因为pettingzoo中智能体死亡，这个字典就没有了，会导致 td target更新出错。所以这里维护一个不变的字典。
         self.env_agents = [agent_id for agent_id in self.agent.agents.keys()]
-        self.done = {agent_id: False for agent_id in self.agent.agents.keys()}
+        self.done = None
 
         # 添加奖励记录相关的属性
         self.reward_sum_record = []  # 用于平滑的奖励记录
@@ -77,10 +81,11 @@ class RUNNER:
         q_values_episode = []  # 记录每个 episode 的 Q 值
 
         # episode循环
-        for episode in range(self.args.episode_num):
+        for episode in trange(self.args.episode_num, desc="Training Episodes"):
             action_dict = {key: None for key in self.env_agents}
             # 记录每个智能体在每个episode的奖励
             self.episode_rewards = 0
+            q_values = []
             training_steps = 0
             print(f"This is episode {episode}")
             # 初始化环境 返回初始状态 为一个字典 键为智能体名字 即env.agents中的内容，内容为对应智能体的状态
@@ -91,8 +96,6 @@ class RUNNER:
             # 每个智能体与环境进行交互
             while not self.done:  # 这里的done是一个布尔值，表示所有智能体是否都完成了
                 # print(self.env.current_time)
-                if self.env.current_time % 100 == 0:
-                    print(f"Step {self.env.current_time}")
                 for key in obs:
                     if len(obs[key]) == 1:
                         action_dict = self.agent.select_action(obs, action_dict)
@@ -112,7 +115,7 @@ class RUNNER:
                         action_dict = self.agent.select_action(obs, action_dict)
 
                 # TODO 这里action上面变成了个字典中的字典，有问题，debug
-                obs, agent_reward, done = self.env.step(action_dict, render=render)
+                obs, agent_reward, self.done = self.env.step(action_dict, render=render)
                 
                 for key in obs:
                     # 开始学习 有学习开始条件 有学习频率
@@ -123,21 +126,25 @@ class RUNNER:
                     ):                    
                         # # 学习
                         q_value = self.agent.learn(self.args.batch_size, self.args.gamma, key)
+                        q_values.append(q_value)
                         training_steps += 1
                         step_trained[key] = step[key]  # 更新训练状态
                         # 更新网络
                         self.agent.update_target(self.args.tau)
 
             rewards.append(self.episode_rewards)
-            q_values_episode.append(np.mean(q_value[-training_steps:]))
+            q_values_episode.append(np.mean(q_values))
 
             # 绘制所有智能体在当前episode的和奖励
             if episode % self.args.plot_interval == 0:
-                plot(rewards, q_values_episode)
+                plot(rewards, q_values_episode, model_path)
                 np.save("rewards.npy", rewards)
                 np.save("q_values.npy", q_values_episode)
-                torch.save(self.agent.actor.state_dict(), model_path)
-                torch.save(self.agent.critic.state_dict(), model_path)
+                # enumerate the agents in the env
+                for agent_id in range(self.env.max_agent_num):
+                    
+                    torch.save(self.agent.agents[agent_id].actor.state_dict(), f"{model_path}_actor_{agent_id}.pth")
+                    torch.save(self.agent.agents[agent_id].critic.state_dict(), f"{model_path}_critic_{agent_id}.pth")
             
 
             print(
