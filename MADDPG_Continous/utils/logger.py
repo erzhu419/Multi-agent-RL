@@ -32,7 +32,7 @@ class TrainingLogger:
             "渲染模式": args.render_mode,
             "总回合数": args.episode_num,
             "每回合步数": args.episode_length,
-            "学习间隔": args.learn_interval,
+            "学习间隔": args.training_freq,
             "随机步数": args.random_steps,
             "tau": args.tau,
             "gamma": args.gamma,

@@ -6,6 +6,7 @@ import threading
 from datetime import datetime
 import torch, psutil
 from tqdm import trange
+from concurrent.futures import ThreadPoolExecutor
 
 model_path = '/home/erzhu419/mine_code/Multi-agent-RL/MADDPG_Continous/models/maddpg_models'  # 模型保存路径
 def plot(rewards, q_values_episode, path):
@@ -16,7 +17,8 @@ def plot(rewards, q_values_episode, path):
     :param window_size: 平滑窗口大小
     """
     import matplotlib.pyplot as plt
-
+    import matplotlib
+    matplotlib.use('Agg')  # 使用非交互式后端，避免Tkinter相关问题
     # 计算平滑奖励
 
     plt.figure(figsize=(10, 5))
@@ -31,12 +33,13 @@ def plot(rewards, q_values_episode, path):
     plt.grid()
 
     plt.close()
-    
+
 class RUNNER:
     def __init__(self, agent, env, args, device, mode ='evaluate'):
         self.agent = agent
         self.env = env
         self.args = args
+        self.device = device
         # 这里为什么新建而不是直接使用用agent.agents.keys()？
         # 因为pettingzoo中智能体死亡，这个字典就没有了，会导致 td target更新出错。所以这里维护一个不变的字典。
         self.env_agents = [agent_id for agent_id in self.agent.agents.keys()]
@@ -64,94 +67,250 @@ class RUNNER:
             self.viz.close()
         else: # evaluate模式下不需要visdom
             pass
-    
 
     def train(self, render):
-        # # 使用visdom实时查看训练曲线
-        # viz = None
-        # if self.par.visdom:
-        #     viz = visdom.Visdom()
-        #     viz.close()
-        step = {agent_id: 0 for agent_id in self.env_agents}
-        step_trained = {agent_id: 0 for agent_id in self.env_agents}  # 初始化每个智能体的训练状态
+        """优化的训练循环，使用批处理和并行处理"""
+        from concurrent.futures import ThreadPoolExecutor
+        import time
 
-        rewards = []    # 记录奖励
-        q_values = []  # 记录 Q 值变化
+        # 初始化性能监控
+        timing_stats = {
+            "select_actions": 0,
+            "step_env": 0,
+            "add_experiences": 0,
+            "train_agents": 0,
+            "total": 0
+        }
 
-        q_values_episode = []  # 记录每个 episode 的 Q 值
+        # 初始化计数器和记录
+        transitions_added = 0
+        last_training_step = 0
+        rewards = []
+        q_values = []
+        q_values_episode = []
+        # 创建活跃智能体集合 - 添加这一行
+        active_agents = set()
+        # 持久化的action字典
+        action_dict = {key: None for key in range(self.env.max_agent_num)}
+
+        # 创建线程池
+        executor = ThreadPoolExecutor(max_workers=self.args.max_workers)
+
+        # 并行动作选择函数
+        def select_actions_batch(obs_dict):
+            """批量为多个智能体选择动作"""
+            if not obs_dict:
+                return {}
+
+            # 收集需要动作的智能体
+            agent_ids = []
+            observations = []
+
+            for agent_id, obs in obs_dict.items():
+                if len(obs) > 0:
+                    agent_ids.append(agent_id)
+                    observations.append(obs[0] if isinstance(obs, list) else obs)
+
+            if not agent_ids:
+                return {}
+
+            # 批量转换为张量
+            try:
+                batch_tensor = torch.FloatTensor(observations).to(self.device)
+
+                # 批量计算动作 (这里可能需要修改MADDPG实现以支持批处理)
+                with torch.no_grad():
+                    actions = {}
+                    for i, agent_id in enumerate(agent_ids):
+                        a, _ = self.agent.agents[agent_id].action(batch_tensor[i:i + 1])
+                        actions[agent_id] = a.squeeze(0).cpu().numpy()
+
+                return actions
+            except Exception as e:
+                print(f"Error in batch action selection: {e}")
+                return {}
 
         # episode循环
-        for episode in trange(self.args.episode_num, desc="Training Episodes"):
-            action_dict = {key: None for key in self.env_agents}
-            # 记录每个智能体在每个episode的奖励
+        for episode in range(self.args.episode_num):
+            # 重置计数和环境
+            ep_start_time = time.time()
             self.episode_rewards = 0
-            q_values = []
             training_steps = 0
-            print(f"This is episode {episode}")
-            # 初始化环境 返回初始状态 为一个字典 键为智能体名字 即env.agents中的内容，内容为对应智能体的状态
+
+            # print(f"Episode {episode}")
             self.env.reset()
             obs, agent_reward, self.done = self.env.initialize_state(render)
-            # trans the value of obs to numpy array
-            # obs = {agent_id: obs[agent_id] for agent_id in range(self.env.max_agent_num)}
-            # 每个智能体与环境进行交互
-            while not self.done:  # 这里的done是一个布尔值，表示所有智能体是否都完成了
-                # print(self.env.current_time)
-                for key in obs:
-                    if len(obs[key]) == 1:
-                        action_dict = self.agent.select_action(obs, action_dict)
-                        # copy the new action to action_dict
-                        
-                    elif len(obs[key]) == 2:
-                        if obs[key][0][1] != obs[key][1][1]:  # Only process when states are different
-                            # Pass the current state_dict directly to the agent.add method
-                            # The modified add method will handle the extraction of observations
-                            
-                            self.agent.add(obs, action_dict, agent_reward, None, self.done)
-                            step[key] += 1
-                            self.episode_rewards += agent_reward[key]
-                        
-                        # 状态更新
-                        obs[key] = obs[key][1:]
-                        action_dict = self.agent.select_action(obs, action_dict)
 
-                # TODO 这里action上面变成了个字典中的字典，有问题，debug
+            # 重置action_dict
+            for key in action_dict:
+                action_dict[key] = None
+
+            # 环境交互循环
+            step_counter = 0
+            while not self.done:
+                step_counter += 1
+
+                ### 1. 批量处理动作选择 ###
+                t0 = time.time()
+
+                # 收集需要动作的智能体
+                need_actions = {k: obs[k] for k in obs if len(obs[k]) == 1 or action_dict[k] is None}
+                if need_actions:
+                    new_actions = select_actions_batch(need_actions)
+                    # 更新action_dict
+                    for k, a in new_actions.items():
+                        action_dict[k] = a
+
+                # 收集状态转换的智能体
+                transitions_list = []
+                state_transitions = {k: obs[k] for k in obs if len(obs[k]) == 2}
+                for k, states in state_transitions.items():
+                    if states[0][1] != states[1][1]:  # 站点变化
+                        transitions_list.append({
+                            "agent_id": k,
+                            "old_state": states[0],
+                            "new_state": states[1],
+                            "action": action_dict[k],
+                            "reward": agent_reward[k]
+                        })
+                        # 更新观察
+                        obs[k] = [states[1]]
+                        # 记录奖励
+                        self.episode_rewards += agent_reward[k]
+
+                # 更新需要新动作的智能体
+                updated_agents = {k: obs[k] for k in state_transitions if k in state_transitions}
+                if updated_agents:
+                    new_actions = select_actions_batch(updated_agents)
+                    for k, a in new_actions.items():
+                        action_dict[k] = a
+
+                timing_stats["select_actions"] += time.time() - t0
+
+                ### 2. 批量添加经验 ###
+                t0 = time.time()
+                if transitions_list:
+                    # 并行添加经验
+                    future_adds = []
+                    for trans in transitions_list:
+                        agent_id = trans["agent_id"]
+                        active_agents.add(agent_id)
+                        local_obs = {agent_id: [trans["old_state"], trans["new_state"]]}
+                        local_action = {agent_id: trans["action"]}
+                        local_reward = {agent_id: trans["reward"]}
+
+                        # 提交添加任务
+                        future_adds.append(
+                            executor.submit(
+                                self.agent.add,
+                                local_obs,
+                                local_action,
+                                local_reward,
+                                None,
+                                self.done
+                            )
+                        )
+
+                    # 等待所有添加完成
+                    for future in future_adds:
+                        future.result()
+
+                    transitions_added += len(transitions_list)
+
+                timing_stats["add_experiences"] += time.time() - t0
+
+                ### 3. 环境步进 ###
+                t0 = time.time()
                 obs, agent_reward, self.done = self.env.step(action_dict, render=render)
-                
-                for key in obs:
-                    # 开始学习 有学习开始条件 有学习频率
-                    if (
-                        step[key] >= self.args.random_steps
-                        and step[key] % self.args.learn_interval == 0
-                        and step[key] != step_trained[key]  # 确保当前 step 尚未训练过
-                    ):                    
-                        # # 学习
-                        q_value = self.agent.learn(self.args.batch_size, self.args.gamma, key)
-                        q_values.append(q_value)
+                timing_stats["step_env"] += time.time() - t0
+
+                ### 4. 训练智能体 ###
+                t0 = time.time()
+                # 修改并行训练部分
+                if transitions_added > self.args.random_steps and transitions_added - last_training_step >= self.args.training_freq:
+                    # 先检查哪些智能体有足够的数据用于训练
+                    valid_agents = []
+                    for agent_id in active_agents:
+                        # 检查这个智能体的缓冲区是否有足够数据
+                        buffer_size = len(self.agent.buffers.get(agent_id, []))
+                        if buffer_size >= self.args.batch_size:
+                            valid_agents.append(agent_id)
+                        else:
+                            # print(f"Skipping agent {agent_id}: Buffer size {buffer_size} < batch size {self.args.batch_size}")
+                            pass
+                    # 只为有足够数据的智能体创建学习任务
+                    future_learns = {}
+                    for agent_id in valid_agents:
+                        future_learns[agent_id] = executor.submit(
+                            self.agent.learn,
+                            self.args.batch_size,
+                            self.args.gamma,
+                            agent_id
+                        )
+
+                    # 收集学习结果
+                    q_values_batch = []
+                    for agent_id, future in future_learns.items():
+                        try:
+                            q_value = future.result()
+                            if q_value is not None:
+                                q_values_batch.append(q_value)
+                        except Exception as e:
+                            print(f"Error training agent {agent_id}: {e}")
+
+                    # 记录平均Q值
+                    if q_values_batch:
+                        q_values.append(np.mean(q_values_batch))
                         training_steps += 1
-                        step_trained[key] = step[key]  # 更新训练状态
-                        # 更新网络
-                        self.agent.update_target(self.args.tau)
 
+                    # 更新目标网络 (仅为有效智能体)
+                    for agent_id in valid_agents:
+                        try:
+                            self.agent.update_target_for_agent(agent_id, self.args.tau)
+                        except Exception as e:
+                            print(f"Error updating target for agent {agent_id}: {e}")
+
+                    last_training_step = transitions_added
+
+                timing_stats["train_agents"] += time.time() - t0
+
+            # Episode结束，记录数据
             rewards.append(self.episode_rewards)
-            q_values_episode.append(np.mean(q_values))
+            if training_steps > 0:
+                q_values_episode.append(np.mean(q_values[-training_steps:]))
+            elif q_values:
+                q_values_episode.append(q_values[-1])
 
-            # 绘制所有智能体在当前episode的和奖励
+            active_agents.clear()
+
+            # 计算总时间
+            episode_time = time.time() - ep_start_time
+            timing_stats["total"] += episode_time
+
+            # 绘图和保存模型
             if episode % self.args.plot_interval == 0:
                 plot(rewards, q_values_episode, model_path)
                 np.save("rewards.npy", rewards)
                 np.save("q_values.npy", q_values_episode)
-                # enumerate the agents in the env
-                for agent_id in range(self.env.max_agent_num):
-                    
-                    torch.save(self.agent.agents[agent_id].actor.state_dict(), f"{model_path}_actor_{agent_id}.pth")
-                    torch.save(self.agent.agents[agent_id].critic.state_dict(), f"{model_path}_critic_{agent_id}.pth")
-            
+                self.agent.save_model()
 
+                # 打印性能统计
+                # print("\nPerformance statistics:")
+                # for name, elapsed in timing_stats.items():
+                #     print(f"  {name}: {elapsed:.2f}s ({elapsed / timing_stats['total'] * 100:.1f}%)")
+                timing_stats = {k: 0 for k in timing_stats}  # 重置计时器
+
+            # 打印统计信息
             print(
-                f"Episode: {episode} | Episode Reward: {self.episode_rewards} "
-                f"| CPU Memory: {psutil.Process().memory_info().rss / 1024 ** 2:.2f} MB | "
-                f"GPU Memory Allocated: {torch.cuda.memory_allocated() / 1024 ** 2:.2f} MB | ")
+                f"Episode: {episode} | Reward: {self.episode_rewards:.2f} | "
+                f"Time: {episode_time:.2f}s | Transitions: {transitions_added} | "
+                f"Active Agents: {len(active_agents)} | "  # 添加这一部分
+                f"CPU: {psutil.Process().memory_info().rss / 1024 ** 2:.1f}MB | "
+                f"GPU: {torch.cuda.memory_allocated() / 1024 ** 2:.1f}MB"
+            )
 
+        # 关闭线程池
+        executor.shutdown()
     def get_running_reward(self, arr):
 
         if len(arr) == 0:  # 如果传入空数组，使用完整记录

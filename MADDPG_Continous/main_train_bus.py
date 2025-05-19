@@ -8,7 +8,6 @@ from utils.runner_bus import RUNNER
 from agents.maddpg.MADDPG_agent_bus import MADDPG
 import torch
 import os
-import cProfile
 import time
 from datetime import timedelta
 from utils.logger import TrainingLogger  # 添加导入
@@ -67,7 +66,7 @@ if __name__ == '__main__':
     # 创建运行对象
     runner = RUNNER(agent, env, args, device, mode = 'train')
     # 开始训练
-    cProfile.run('runner.train(render)', filename='train_profile_report.prof')
+    runner.train(render)
     print("agent",agent)
 
     # 计算训练时间

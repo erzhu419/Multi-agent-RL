@@ -32,6 +32,19 @@ class MADDPG():
         self.dim_info = dim_info
         self.batch_size = batch_size
 
+    def update_target_for_agent(self, agent_id, tau):
+        """Update target networks for a specific agent"""
+
+        def soft_update(from_network, to_network):
+            """Copy parameters with proportion tau"""
+            for from_p, to_p in zip(from_network.parameters(), to_network.parameters()):
+                to_p.data.copy_(tau * from_p.data + (1.0 - tau) * to_p.data)
+
+        if agent_id in self.agents:
+            agent = self.agents[agent_id]
+            soft_update(agent.actor, agent.target_actor)
+            soft_update(agent.critic, agent.target_critic)
+
     def add(self, obs, action, reward, next_obs, done):
         keys_with_two_obs = [key for key, val in obs.items() if isinstance(val, list) and len(val) == 2]
         
@@ -46,16 +59,21 @@ class MADDPG():
             
             # 只添加一次
             self.buffers[agent_id].add(o, a, r, next_o, d)
-    
+
     def sample(self, batch_size, agent_id):
         """Sample experience from the buffer of a specific agent."""
         # Get the buffer for the specified agent
+        if agent_id not in self.buffers:
+            print(f"Buffer for agent {agent_id} not found")
+            return None
+
         buffer = self.buffers[agent_id]
-        
-        # Get the total number of transitions in the buffer
+
+        # Check if buffer has enough samples
         total_num = len(buffer)
-        if total_num == 0:
-            raise ValueError(f"Buffer for agent {agent_id} is empty. Cannot sample.")
+        if total_num < batch_size:
+            print(f"Buffer for agent {agent_id} has only {total_num} samples, need {batch_size}")
+            return None
 
         # Randomly sample indices
         indices = np.random.choice(total_num, size=batch_size, replace=True)
@@ -67,7 +85,7 @@ class MADDPG():
         next_a, _ = self.agents[agent_id].target_action(n_o)
 
         return o, a, r, n_o, d, next_a
-    
+
     # 在select_action中实现批处理
     def select_action(self, obs, action):
         with torch.no_grad():  # 避免不必要的梯度计算
@@ -86,30 +104,42 @@ class MADDPG():
                 
             return action
             
-        return action
     # 更多解释-飞书链接：https://m6tsmtxj3r.feishu.cn/docx/Kb1vdqvBholiIUxcvYxcIcBcnEg?from=from_copylink   密码：6u2257#8
     def learn(self, batch_size, gamma, agent_id):
         """Train the specified agent."""
+        # Check if agent exists
+        if agent_id not in self.agents:
+            print(f"Agent {agent_id} not found")
+            return None
+
+        # Get sample data
+        sample_data = self.sample(batch_size, agent_id)
+        if sample_data is None:
+            return None
+
+        o, a, r, n_o, d, next_a = sample_data
         agent = self.agents[agent_id]
-        o, a, r, n_o, d, next_a = self.sample(batch_size, agent_id)
-        # --- reward 标准化和缩放（与 SAC 一致） ---
+
+        # 标准化奖励
         reward_scale = 10.0
         r = reward_scale * (r - r.mean(dim=0)) / (r.std(dim=0) + 1e-6)
-        # ----------------------------------------
-        # Update Critic Network
+
+        # 更新Critic网络
         critic_value = agent.critic_value([o], [a])
         next_target_critic_value = agent.target_critic_value([n_o], [next_a])
         target_value = r + gamma * next_target_critic_value * (1 - d)
         critic_loss = F.mse_loss(critic_value, target_value.detach(), reduction="mean")
         agent.update_critic(critic_loss)
 
-        # Update Actor Network
+        # 更新Actor网络
         action, logits = agent.action(o, model_out=True)
         actor_loss = -agent.critic_value([o], [action]).mean()
         actor_loss_pse = torch.pow(logits, 2).mean()  # Regularization term
         agent.update_actor(actor_loss + 1e-3 * actor_loss_pse)
 
         return critic_value.mean().item()
+
+
     def update_target(self, tau): #  嵌套函数定义
         def soft_update(from_network, to_network):
             """ copy the parameters of `from_network` to `to_network` with a proportion of tau """
@@ -138,9 +168,9 @@ class MADDPG():
 
         agent_id = list(self.dim_info.keys())[0]  # 获取第一个代理的 ID
         agent = self.agents[agent_id]
-        for name, param in agent.actor.state_dict().items():
-        # 仅打印前几个值（例如前5个）
-            print(f"Layer: {name}, Shape: {param.shape}, Values: {param.flatten()[:5]}")  # flatten() 展开参数为一维数组
+        # for name, param in agent.actor.state_dict().items():
+        # # 仅打印前几个值（例如前5个）
+        #     print(f"Layer: {name}, Shape: {param.shape}, Values: {param.flatten()[:5]}")  # flatten() 展开参数为一维数组
 
 
     def load_model(self):
@@ -152,7 +182,7 @@ class MADDPG():
 
         agent_id = list(self.dim_info.keys())[0]  # 获取第一个代理的 ID
         agent = self.agents[agent_id]
-        for name, param in agent.actor.state_dict().items():
-        # 仅打印前几个值（例如前5个）
-            print(f"Layer: {name}, Shape: {param.shape}, Values: {param.flatten()[:5]}")  # flatten() 展开参数为一维数组
+        # for name, param in agent.actor.state_dict().items():
+        # # 仅打印前几个值（例如前5个）
+        #     print(f"Layer: {name}, Shape: {param.shape}, Values: {param.flatten()[:5]}")  # flatten() 展开参数为一维数组
   
