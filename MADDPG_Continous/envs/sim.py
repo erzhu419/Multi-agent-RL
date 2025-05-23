@@ -47,9 +47,9 @@ class env_bus(object):
         self.timetable_set = self.timetable_set.sort_values(by=['launch_time', 'direction'])[:self.effective_trip_num].reset_index(drop=True)
         # add index for timetable
         self.timetable_set['launch_turn'] = range(self.timetable_set.shape[0])
-        self.max_agent_num = 30
+        self.max_agent_num = 25
 
-        self.visualizer = visualize(self)
+        self.visualizer = visualize(self, render)
 
         # Set effective station and time period
         self.effective_station_name = sorted(set([self.od.index[i][0] for i in range(self.od.shape[0])]))
@@ -66,9 +66,9 @@ class env_bus(object):
         self.routes = self.set_routes()
         self.timetables = self.set_timetables()
 
-        self.state_dim = 4
+        self.state_dim = 3
 
-        self.action_space = Box(0, 60, shape=(1,))
+        self.action_space = Box(0, 20, shape=(1,))
         self.observation_space = Box(0, 60, shape=(self.state_dim,))
 
     # def save_snapshot(self):
@@ -298,7 +298,7 @@ class env_bus(object):
 
         if render and self.current_time % 1 == 0:
             self.visualizer.render()
-            time.sleep(0.05)  # Add a delay to slow down the rendering
+            time.sleep(0)  # Add a delay to slow down the rendering
 
         return self.state, self.reward, self.done
 

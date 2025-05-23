@@ -21,7 +21,7 @@ def get_env(render):
     #     new_env = simple_spread_v3.parallel_env(max_cycles=ep_len, render_mode="rgb_array")
     # if env_name == 'simple_tag_v3':
     #     new_env = simple_tag_v3.parallel_env(render_mode = render_mode, num_good=1, num_adversaries=3, num_obstacles=0, max_cycles=ep_len, continuous_actions=True)
-    # if env_name == 'simple_tag_env':
+    # if env_name == 'simple_tag_env':  
     #     new_env = simple_tag_env.parallel_env(render_mode = render_mode, num_good=1, num_adversaries=3, num_obstacles=0, max_cycles=ep_len, continuous_actions=True)
     path = os.getcwd() + '/MADDPG_Continous/envs'
     debug = True
@@ -79,7 +79,6 @@ if __name__ == '__main__':
     print(f"训练用时: {training_duration}")
 
     # 使用logger保存训练日志
-       # 使用logger保存训练日志
     logger = TrainingLogger()
     current_time = logger.save_training_log(args, device, training_duration, runner)
     print(f"完成时间: {current_time}")

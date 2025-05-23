@@ -1,8 +1,6 @@
 import numpy as np
-import visdom
 import csv
-import os
-import threading
+import os, time
 from datetime import datetime
 import torch, psutil
 from tqdm import trange
@@ -63,6 +61,7 @@ class RUNNER:
         ''' #TODO
 
         if mode == 'train' and self.args.visdom:
+            import visdom
             self.viz = visdom.Visdom()
             self.viz.close()
         else: # evaluate模式下不需要visdom
@@ -70,8 +69,6 @@ class RUNNER:
 
     def train(self, render):
         """优化的训练循环，使用批处理和并行处理"""
-        from concurrent.futures import ThreadPoolExecutor
-        import time
 
         # 初始化性能监控
         timing_stats = {
@@ -92,6 +89,8 @@ class RUNNER:
         active_agents = set()
         # 持久化的action字典
         action_dict = {key: None for key in range(self.env.max_agent_num)}
+        trained_steps = {key: 0 for key in range(self.env.max_agent_num)}
+        agent_steps = {key: 0 for key in range(self.env.max_agent_num)}
 
         # 创建线程池
         executor = ThreadPoolExecutor(max_workers=self.args.max_workers)
@@ -109,7 +108,7 @@ class RUNNER:
             for agent_id, obs in obs_dict.items():
                 if len(obs) > 0:
                     agent_ids.append(agent_id)
-                    observations.append(obs[0] if isinstance(obs, list) else obs)
+                    observations.append(obs[-1][2:] if isinstance(obs, list) else obs[2:])
 
             if not agent_ids:
                 return {}
@@ -153,35 +152,39 @@ class RUNNER:
                 ### 1. 批量处理动作选择 ###
                 t0 = time.time()
 
-                # 收集需要动作的智能体
-                need_actions = {k: obs[k] for k in obs if len(obs[k]) == 1 or action_dict[k] is None}
-                if need_actions:
-                    new_actions = select_actions_batch(need_actions)
+                # 第一次到达某个站点的情况
+                first_station_states = {k: obs[k] for k in obs if len(obs[k]) == 1 and action_dict[k] is None}
+                if first_station_states:
+                    new_actions = select_actions_batch(first_station_states)
                     # 更新action_dict
                     for k, a in new_actions.items():
                         action_dict[k] = a
-
+                # 非第一次到达某个站点的情况
+                second_station_states = {k: obs[k] for k in obs if len(obs[k]) == 2}
                 # 收集状态转换的智能体
                 transitions_list = []
-                state_transitions = {k: obs[k] for k in obs if len(obs[k]) == 2}
-                for k, states in state_transitions.items():
+                for k, states in second_station_states.items():
                     if states[0][1] != states[1][1]:  # 站点变化
                         transitions_list.append({
                             "agent_id": k,
-                            "old_state": states[0],
-                            "new_state": states[1],
+                            "old_state": states[0][2:],
+                            "new_state": states[1][2:],
                             "action": action_dict[k],
                             "reward": agent_reward[k]
                         })
-                        # 更新观察
-                        obs[k] = [states[1]]
                         # 记录奖励
                         self.episode_rewards += agent_reward[k]
+                        transitions_added += 1
+                        agent_steps[k] += 1
 
-                # 更新需要新动作的智能体
-                updated_agents = {k: obs[k] for k in state_transitions if k in state_transitions}
-                if updated_agents:
-                    new_actions = select_actions_batch(updated_agents)
+                    # 更新观察
+                    obs[k] = [states[1]]
+                    
+
+                # # 更新需要新动作的智能体
+                # updated_agents = {k: obs[k] for k in state_transitions if k in state_transitions}
+                if second_station_states:
+                    new_actions = select_actions_batch(second_station_states)
                     for k, a in new_actions.items():
                         action_dict[k] = a
 
@@ -215,12 +218,13 @@ class RUNNER:
                     for future in future_adds:
                         future.result()
 
-                    transitions_added += len(transitions_list)
 
                 timing_stats["add_experiences"] += time.time() - t0
 
                 ### 3. 环境步进 ###
                 t0 = time.time()
+                # all zero action
+                action_zero = {k: np.zeros(self.env.action_space.shape[0]) for k in action_dict.keys()}
                 obs, agent_reward, self.done = self.env.step(action_dict, render=render)
                 timing_stats["step_env"] += time.time() - t0
 
@@ -235,18 +239,20 @@ class RUNNER:
                         buffer_size = len(self.agent.buffers.get(agent_id, []))
                         if buffer_size >= self.args.batch_size:
                             valid_agents.append(agent_id)
+                            trained_steps[agent_id] += agent_steps[agent_id]
                         else:
                             # print(f"Skipping agent {agent_id}: Buffer size {buffer_size} < batch size {self.args.batch_size}")
                             pass
                     # 只为有足够数据的智能体创建学习任务
                     future_learns = {}
                     for agent_id in valid_agents:
-                        future_learns[agent_id] = executor.submit(
-                            self.agent.learn,
-                            self.args.batch_size,
-                            self.args.gamma,
-                            agent_id
-                        )
+                        if trained_steps[agent_id] != agent_steps[agent_id]:
+                            future_learns[agent_id] = executor.submit(
+                                self.agent.learn,
+                                self.args.batch_size,
+                                self.args.gamma,
+                                agent_id
+                            )
 
                     # 收集学习结果
                     q_values_batch = []
@@ -306,7 +312,8 @@ class RUNNER:
                 f"Time: {episode_time:.2f}s | Transitions: {transitions_added} | "
                 f"Active Agents: {len(active_agents)} | "  # 添加这一部分
                 f"CPU: {psutil.Process().memory_info().rss / 1024 ** 2:.1f}MB | "
-                f"GPU: {torch.cuda.memory_allocated() / 1024 ** 2:.1f}MB"
+                f"GPU: {torch.cuda.memory_allocated() / 1024 ** 2:.1f}MB |"
+                f"Total Steps: {step_counter}"
             )
 
         # 关闭线程池

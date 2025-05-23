@@ -11,7 +11,7 @@ def main_parameters():
     parser.add_argument("--max_workers", type = int, default = 8, help = "number of parallel workers")
     parser.add_argument('--training_freq', type=int, default=5,
                         help='steps interval between learning time')
-    parser.add_argument('--random_steps', type=int, default=5000, help='random steps before the agent start to learn') #  2e3
+    parser.add_argument('--random_steps', type=int, default=50000, help='random steps before the agent start to learn') #  2e3
     parser.add_argument('--tau', type=float, default=0.001, help='soft update parameter')
     parser.add_argument('--gamma', type=float, default=0.99, help='discount factor')
     parser.add_argument('--buffer_capacity', type=int, default=int(1e5), help='capacity of replay buffer')

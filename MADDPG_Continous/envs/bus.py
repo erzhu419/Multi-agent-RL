@@ -214,7 +214,7 @@ class Bus(object):
                     self.backward_bus = list(filter(lambda x: self.trip_id + 2 in x.trip_id_list, bus_all))
 
                     if self.next_station in self.effective_station[2:] and (len(self.forward_bus) != 0 or len(self.backward_bus) != 0):
-                        self.obs = [current_time // 3600, self.forward_headway, self.backward_headway,
+                        self.obs = [self.bus_id, self.last_station.station_id, self.forward_headway, self.backward_headway,
                                     len(self.next_station.waiting_passengers) * 1.5 + self.current_route.distance/self.current_route.speed_limit]
                         # all_route = self.routes_list[:len(self.routes_list)//2] if self.direction else self.routes_list[len(self.routes_list)//2:]
                         # speed_list = [all_route[i].speed_limit for i in range(len(all_route))]

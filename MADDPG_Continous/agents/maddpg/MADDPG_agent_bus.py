@@ -87,7 +87,7 @@ class MADDPG():
         return o, a, r, n_o, d, next_a
 
     # 在select_action中实现批处理
-    def select_action(self, obs, action):
+    def select_action(self, obs, action, noise_std=0.2):
         with torch.no_grad():  # 避免不必要的梯度计算
             keys_to_process = [k for k in obs if len(obs[k]) > 0]
             if not keys_to_process:
@@ -101,7 +101,11 @@ class MADDPG():
             for i, k in enumerate(keys_to_process):
                 a, _ = self.agents[k].action(batch_obs[i:i+1])
                 action[k] = a.cpu().numpy().squeeze(0)
-                
+                # 加高斯噪声
+                a += np.random.normal(0, noise_std, size=a.shape)
+                # clip 到动作空间
+                a = np.clip(a, self.agents[k].actor.action_bound[0], self.agents[k].actor.action_bound[1])
+                action[k] = a
             return action
             
     # 更多解释-飞书链接：https://m6tsmtxj3r.feishu.cn/docx/Kb1vdqvBholiIUxcvYxcIcBcnEg?from=from_copylink   密码：6u2257#8
