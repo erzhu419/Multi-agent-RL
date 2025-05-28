@@ -27,7 +27,7 @@ class MLPNetworkActor(nn.Module):
         '''init patameters of the module'''
         gain = nn.init.calculate_gain('relu')
         if isinstance(m, nn.Linear):
-            nn.init.orthogonal_(m.weight, gain = gain)  #使用了 orthogonal 分布初始化
+            nn.init.xavier_uniform_(m.weight, gain = gain)  #使用了 orthogonal 分布初始化
             m.bias.data.fill_(0.01)
     
     def forward(self, x):

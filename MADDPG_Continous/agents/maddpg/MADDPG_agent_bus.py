@@ -10,11 +10,11 @@ class MADDPG():
     # device = 'cpu'
     # device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    def __init__(self, dim_info, capacity, batch_size, actor_lr, critic_lr, action_bound, _chkpt_dir, _device = 'cpu', _model_timestamp = None):
+    def __init__(self, args, dim_info, capacity, batch_size, actor_lr, critic_lr, action_bound, _chkpt_dir, _device = 'cpu', _model_timestamp = None):
         # 确保模型保存路径存在
         if _chkpt_dir is not None:
             os.makedirs(_chkpt_dir, exist_ok=True)
-
+        self.args = args
         self.device = _device
         self.model_timestamp = _model_timestamp
         # 状态（全局观测）与所有智能体动作维度的和 即critic网络的输入维度  dim_info =  [obs_dim, act_dim]
@@ -22,6 +22,10 @@ class MADDPG():
         # 创建智能体与buffer，每个智能体有自己的buffer, actor, critic
         self.agents = {}
         self.buffers = {}
+        # 记录actor和critic的更新次数，作为异步更新的依据
+        self.actor_update_count = 0
+        self.critic_update_count = 0
+        
         for agent_id, (obs_dim, act_dim) in dim_info.items():
             # print("dim_info -> agent_id:",agent_id)
             # 每一个智能体都是一个DDPG智能体
@@ -132,14 +136,17 @@ class MADDPG():
         critic_value = agent.critic_value([o], [a])
         next_target_critic_value = agent.target_critic_value([n_o], [next_a])
         target_value = r + gamma * next_target_critic_value * (1 - d)
-        critic_loss = F.mse_loss(critic_value, target_value.detach(), reduction="mean")
+        mask = (d < 1.0).float()
+        critic_loss = (F.mse_loss(critic_value, target_value.detach(), reduction='none') * mask).sum() / mask.sum()
         agent.update_critic(critic_loss)
+        self.critic_update_count += 1
 
         # 更新Actor网络
-        action, logits = agent.action(o, model_out=True)
-        actor_loss = -agent.critic_value([o], [action]).mean()
-        actor_loss_pse = torch.pow(logits, 2).mean()  # Regularization term
-        agent.update_actor(actor_loss + 1e-3 * actor_loss_pse)
+        if self.critic_update_count %  self.args.critic_actor_ratio == 0:
+            action, logits = agent.action(o, model_out=True)
+            actor_loss = -agent.critic_value([o], [action]).mean()
+            actor_loss_pse = torch.pow(logits, 2).mean()  # Regularization term
+            agent.update_actor(actor_loss + 1e-3 * actor_loss_pse)
 
         return critic_value.mean().item()
 
